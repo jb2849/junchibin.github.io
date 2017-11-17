@@ -1,0 +1,258 @@
+---
+title: "Feature Engineering For California"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+
+
+```{r,warning = F, message=F}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(DT)
+library(tidyr)
+library(corrplot)
+library(leaflet)
+library(lubridate)
+setwd("E:/AVM_Demo/Data")
+source("function.R")
+structure <- read.csv("structure_LA.csv", stringsAsFactors = FALSE)
+site <- read.csv("site_LA.csv", stringsAsFactors = FALSE)
+sales <- read.csv("sales_LA.csv", stringsAsFactors = FALSE)
+tax <- read.csv("tax_LA.csv", stringsAsFactors = FALSE)
+
+```
+
+
+#Outcome
+##Sales_Price Outcome
+```{r,warning=FALSE, message=FALSE}
+#There are some records without mentioned transaction date
+
+sales_no_null <- sales[!sales$date =="",]
+sales_no_null_2015 <- sales_no_null[as.Date(sales_no_null$date) >= as.Date("2015-10-01"),]  
+temp <- sales_no_null_2015 %>% mutate(year_month = make_date(year = year(as.Date(date)) , month = month(as.Date(date))), log_price = log(price))
+
+
+temp %>%
+        group_by(year_month) %>% count() %>%
+        ggplot(aes(x= year_month, y = n)) + geom_bar(stat = "identity", fill = 'red')+
+        geom_vline(aes(xintercept = as.numeric(as.Date("2017-01-01"))),size = 2)
+temp %>% 
+        ggplot(aes(x = log_price)) +
+        geom_histogram(bin= 400, fill = "red")+
+         theme_bw()+theme(axis.title = element_text(size=16),axis.text = element_text(size=14))+
+         ylab("Count")+geom_vline(aes(xintercept = as.numeric(median(log_price))),size = 2)# + coord_cartesian(x=c(quan_price[1],quan_price[2]))
+        
+temp %>% 
+  group_by(year_month) %>% summarize(mean_price = mean(price)) %>% 
+  ggplot(aes(x=year_month,y=mean_price)) + 
+  geom_line(size = 1.5,color= "red")+
+  geom_point(size = 5,color= "red")+theme_bw()
+```
+
+## Missing Plot and Missing Value Impulation
+```{r, warning=F, message=F}
+cal_missing <- function(var){
+        missing_values = var %>% summarize_each(funs(sum(is.na(.))/n()))
+        
+        missing_values = gather(missing_values, key = "feature", value = "missing_pct")
+        return(missing_values)
+}
+select_low_miss_feature <- function(var){
+        missing_values = cal_missing(var)
+        return(missing_values[missing_values$missing_pct <= 0.25, "feature"])
+}
+plot_missing <- function(var, name = "Unknown"){
+        p = cal_missing(var) %>% ggplot(aes(x=reorder(feature,-missing_pct),y=missing_pct)) +
+  geom_bar(stat="identity",fill="red")+
+  coord_flip()+theme_bw()+labs(title = paste("Missing Values in ", name))
+        return(p)
+}
+min_max <- function(x){
+        normalized = (x-min(x))/(max(x)-min(x))
+        return(normalized)
+}
+```
+
+###Structure
+```{r,warning=FALSE, message=FALSE}
+print(plot_missing(structure, name = "Structure"))
+featureLM_stru = select_low_miss_feature(structure)
+
+```
+
+###Site
+```{r,warning=FALSE, message=FALSE}
+print(plot_missing(site,"Site"))
+featureLM_site = select_low_miss_feature(site)
+
+```
+
+###Tax
+```{r,warning=FALSE, message=FALSE}
+
+print(plot_missing(tax,"Tax"))
+featureLM_tax = select_low_miss_feature(tax)
+```
+
+
+###Sales
+```{r,warning=FALSE, message=FALSE}
+print(plot_missing(sales_no_null_2015,"Sales (After 2015)"))
+featureLM_sales_2015 = select_low_miss_feature(sales_no_null_2015)
+```
+
+#Geo Distribution
+
+
+
+```{r, warning= FALSE}
+
+
+temp = sales_no_null_2015 %>%  mutate(log_price = log(price)) %>% left_join(site, by = "property_id") %>% select(property_id, longitude, latitude, log_price)
+
+
+
+
+
+qpal = colorQuantile("YlOrRd", temp$log_price, n = 7)
+
+leaflet(temp) %>% 
+  addTiles() %>% 
+  addCircleMarkers(~longitude, ~latitude,stroke=FALSE, color=~qpal(log_price),fillOpacity = 1) %>% addLegend("bottomright", pal = qpal, values = ~log_price,title = "Price",opacity = 1)
+```
+#Geo
+
+```{r}
+places = read.csv("geo/places.csv",stringsAsFactors = F)
+```
+
+```{r}
+POI_LA = places[places$county_fips == 37,]
+POI_LA = POI_LA[POI_LA$state_fips == 6,]
+populated =POI_LA[POI_LA$feature_class %in% "Locale",]
+b = POI_LA[POI_LA$category %in% "Police",]
+
+leaflet(populated) %>%
+        addTiles()%>%
+        addMarkers(~longitude,~latitude, label = ~feature_name
+                   ,clusterOptions = markerClusterOptions())
+
+```
+
+```{r}
+crime_record = read.csv("crime/aggregated.csv", stringsAsFactors = F,na.strings = c("NA","NaN", " ", "NULL") )
+
+```
+
+```{r,echo= FALSE}
+crime_record = crime_record[crime_record$agency %in% b$feature_name,]
+crime_record_2012 = crime_record[crime_record$year== 2012,c( "year","agency","violent_crime_rate","murder_rate","forcible_rape_rate","robbery_rate","property_crime_total_rate","burglary_rate","larceny_theft_rate","motor_vehicle_theft_rate")]
+
+```
+
+### Crime
+```{r,echo= FALSE}
+library(caret)
+
+crime_record_geo = crime_record_2012
+b_la = b[b$feature_name %in% crime_record_geo$agency,] 
+b_geo = data.frame()
+for(i in 1:nrow(b_la)){
+        temp = cbind(b_la[i,], crime_record_geo[crime_record_geo$agency == b_la[i,"feature_name"],])
+        b_geo = rbind(b_geo, temp)            
+}
+b_geo = b_geo %>% mutate(log_property_crime = log(property_crime_total_rate), log_violent_crime = log(violent_crime_rate))
+
+
+qpal <- colorQuantile("YlOrRd", min_max(b_geo$burglary_rate), n = 7)
+leaflet(b_geo) %>%
+  addTiles() %>% 
+  addCircleMarkers(~longitude,~latitude,stroke=FALSE, color=~qpal(min_max(burglary_rate)),fillOpacity = 1) %>% 
+  addLegend("bottomright", pal = qpal, values = ~min_max(burglary_rate),title = "Bulgary",opacity = 1)
+
+```
+
+
+
+```{r,echo= FALSE}
+
+qpal <- colorQuantile("YlOrRd", min_max(b_geo$larceny_theft_rate), n = 7)
+leaflet(b_geo) %>%
+  addTiles() %>% 
+  addCircleMarkers(~longitude,~latitude,stroke=FALSE, color=~qpal(min_max(larceny_theft_rate)),fillOpacity = 1) %>% 
+  addLegend("bottomright", pal = qpal, values = ~min_max(larceny_theft_rate),title = "Theft",opacity = 1)
+
+```
+### Murder
+```{r,echo= FALSE}
+
+qpal <- colorQuantile("YlOrRd", min_max(b_geo$robbery_rate), n = 7)
+leaflet(b_geo) %>%
+  addTiles() %>% 
+  addCircleMarkers(~longitude,~latitude,stroke=FALSE, color=~qpal(min_max(robbery_rate)),fillOpacity = 1) %>% 
+  addLegend("bottomright", pal = qpal, values = ~min_max(robbery_rate),title = "Robbery",opacity = 1)
+
+```
+
+```{r,echo= FALSE}
+
+qpal <- colorQuantile("YlOrRd", min_max(b_geo$motor_vehicle_theft_rate), n = 7)
+leaflet(b_geo) %>%
+  addTiles() %>% 
+  addCircleMarkers(~longitude,~latitude,stroke=FALSE, color=~qpal(min_max(motor_vehicle_theft_rate)),fillOpacity = 1) %>% 
+  addLegend("bottomright", pal = qpal, values = ~min_max(motor_vehicle_theft_rate),title = "Motor Theft",opacity = 1)
+
+```
+```{r,echo= FALSE}
+
+qpal <- colorQuantile("YlOrRd", min_max(b_geo$violent_crime_rate), n = 7)
+leaflet(b_geo) %>%
+  addTiles() %>% 
+  addCircleMarkers(~longitude,~latitude,stroke=FALSE, color=~qpal(min_max(violent_crime_rate)),fillOpacity = 1) %>% 
+  addLegend("bottomright", pal = qpal, values = ~min_max(violent_crime_rate),title = "Violent Theft",opacity = 1)
+
+```
+
+```{r,echo= FALSE}
+
+qpal <- colorQuantile("YlOrRd", unique(min_max(b_geo$murder_rate)),n =7)
+leaflet(b_geo) %>%
+  addTiles() %>% 
+  addCircleMarkers(~longitude,~latitude,stroke=FALSE, color=~qpal(min_max(b_geo$murder_rate)),fillOpacity = 1) %>% 
+  addLegend("bottomright", pal = qpal, values = ~min_max(b_geo$murder_rate),title = "Murder",opacity = 1)
+
+```
+###Crime and HPI
+```{r,echo =F}
+library(readxl)
+hpi = read_xlsx("crime/HPI_AT_BDL_county.xlsx")
+hpi_la = hpi[hpi$`FIPS code` == "06037",] 
+LA_County_crime = read.csv("crime/LA_county.csv", stringsAsFactors = F)
+
+```
+
+```{r,echo =F}
+LA_County_crime$Year = as.numeric(LA_County_crime$Year)
+hpi_la$Year = as.numeric(hpi_la$Year)
+hpi_la$HPI = as.numeric(hpi_la$HPI)
+temp = hpi_la %>% left_join(LA_County_crime, by = "Year") %>% mutate(log_hpi = log(HPI),log_violence = log(Violent.crime.total), log_robbery = log(Robbery), log_bulglary = log(Burglary), log_theft = log(Larceny.theft))
+temp = temp[!is.na(temp$Violent.crime.total),!apply(temp, 2, function(x) all(gsub(" ", "", x)=="", na.rm=TRUE))]
+
+
+```
+
+```{r,echo =F}
+temp_year = temp[,c("Year","log_hpi" ,"log_violence", "log_robbery" , "log_bulglary", 'log_theft')]
+library(reshape2)
+crysis = data.frame(Crysis = 'Crysis', year = c(1997,2007,2008))
+mdf = melt(temp_year, id.vars = "Year")
+mdf %>% 
+
+  ggplot(aes(x=Year,y=value,color =variable, group = variable)) + 
+  geom_line(size = 1.5)+ geom_point(size = 3)+ geom_vline(data = crysis,  aes(xintercept = year),size = 1)+theme_bw()+scale_x_continuous(breaks = seq(1985,2014,2))
+```
